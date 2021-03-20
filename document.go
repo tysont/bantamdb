@@ -1,13 +1,13 @@
 package main
 
 type Document struct {
-	Key    string
+	Id     string
 	Fields map[string][]byte
 }
 
-func NewDocument(key string, fields map[string][]byte) *Document {
+func NewDocument(id string, fields map[string][]byte) *Document {
 	return &Document{
-		Key: key,
+		Id:     id,
 		Fields: fields,
 	}
 }

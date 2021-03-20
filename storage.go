@@ -1,6 +1,7 @@
 package main
 
 type Storage interface {
-	Put(document *Document) error
-	Get(key string) (*Document, error)
+	Apply(batch *Batch) error
+	Get(id string) (*Document, error)
+	Range(min uint32, max uint32) (chan *Document, error)
 }

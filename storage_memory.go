@@ -1,23 +1,53 @@
 package main
 
 import (
+	"errors"
 	"sort"
+	"sync"
 )
 
 type MemoryStorage struct {
-	locations []uint32
-	documents map[uint32]*Document
+	lock *sync.Mutex
+	epoch uint64
+	documents map[uint64]*Document
+	locations []uint64
+	epochs map[uint64]uint64
 }
 
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		locations: make([]uint32, 0),
-		documents: make(map[uint32]*Document, 0),
+		lock: &sync.Mutex{},
+		epoch: 0,
+		documents: make(map[uint64]*Document, 0),
+		locations: make([]uint64, 0),
+		epochs: make(map[uint64]uint64, 0),
 	}
 }
 
-func (s *MemoryStorage) Put(document *Document) error {
-	l := GetMurmurHash(document.Key)
+func (s *MemoryStorage) Apply(batch *Batch) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	for _, transaction := range batch.Transactions {
+		for _, check := range transaction.Checks {
+			l := GetMurmurHash(check)
+			if e, ok := s.epochs[l]; ok {
+				if e > batch.Epoch {
+					return errors.New("optimistic concurrency control check failed")
+				}
+			}
+		}
+		for _, document := range transaction.Writes {
+			err := s.put(document)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStorage) put(document *Document) error {
+	l := GetMurmurHash(document.Id)
 	s.documents[l] = document
 	s.locations = append(s.locations, l)
 	i := sort.Search(len(s.locations), func(i int) bool { return s.locations[i] > l })
@@ -25,15 +55,16 @@ func (s *MemoryStorage) Put(document *Document) error {
 		copy(s.locations[i+1:], s.locations[i:])
 		s.locations[i] = l
 	}
+	s.epochs[l] = s.epoch
 	return nil
 }
 
-func (s *MemoryStorage) Get(key string) (*Document, error) {
-	l := GetMurmurHash(key)
+func (s *MemoryStorage) Get(id string) (*Document, error) {
+	l := GetMurmurHash(id)
 	return s.documents[l], nil
 }
 
-func (s *MemoryStorage) GetRange(min uint32, max uint32) (chan *Document, error) {
+func (s *MemoryStorage) Range(min uint64, max uint64) (chan *Document, error) {
 	c := make(chan *Document, 128)
 	n := sort.Search(len(s.locations), func(i int) bool { return s.locations[i] >= min })
 	go func() {
