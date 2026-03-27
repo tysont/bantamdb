@@ -61,3 +61,12 @@ func (c *Coordinator) Scan() ([]*Document, error) {
 	at := c.storage.AppliedTimestamp()
 	return c.storage.Scan(at)
 }
+
+// ScanAt returns all documents at a specific timestamp. It blocks until
+// storage has caught up to the requested timestamp.
+func (c *Coordinator) ScanAt(at Timestamp) ([]*Document, error) {
+	if err := c.storage.WaitForTimestamp(at); err != nil {
+		return nil, err
+	}
+	return c.storage.Scan(at)
+}

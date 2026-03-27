@@ -149,6 +149,63 @@ func TestHTTP_Transaction(t *testing.T) {
 	assert.Equal(http.StatusOK, resp.StatusCode)
 }
 
+func TestHTTP_ReadAfterTimestamp(t *testing.T) {
+	assert := assert.New(t)
+	server, cleanup := newTestServer()
+	defer cleanup()
+
+	// Write a document and capture the commit timestamp
+	resp := postDocument(t, server.URL, "key1", map[string]string{"v": "one"})
+	var result map[string]string
+	json.NewDecoder(resp.Body).Decode(&result)
+	resp.Body.Close()
+	writeTS := result["timestamp"]
+	require.NotEmpty(t, writeTS)
+
+	// GET with ?after= should wait for storage and return the document
+	resp, err := http.Get(server.URL + "/documents/key1?after=" + writeTS)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(http.StatusOK, resp.StatusCode)
+
+	var doc Document
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&doc))
+	assert.Equal("one", string(doc.Fields["v"]))
+}
+
+func TestHTTP_ScanAfterTimestamp(t *testing.T) {
+	assert := assert.New(t)
+	server, cleanup := newTestServer()
+	defer cleanup()
+
+	postDocument(t, server.URL, "a", map[string]string{"v": "1"})
+	resp := postDocument(t, server.URL, "b", map[string]string{"v": "2"})
+	var result map[string]string
+	json.NewDecoder(resp.Body).Decode(&result)
+	resp.Body.Close()
+	writeTS := result["timestamp"]
+
+	// Scan with ?after= guarantees both documents are visible
+	resp, err := http.Get(server.URL + "/documents?after=" + writeTS)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(http.StatusOK, resp.StatusCode)
+
+	var docs []Document
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&docs))
+	assert.Len(docs, 2)
+}
+
+func TestHTTP_BadAfterTimestamp(t *testing.T) {
+	server, cleanup := newTestServer()
+	defer cleanup()
+
+	resp, err := http.Get(server.URL + "/documents/foo?after=not-a-timestamp")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
 func TestHTTP_BadRequest(t *testing.T) {
 	server, cleanup := newTestServer()
 	defer cleanup()

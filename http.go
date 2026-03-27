@@ -51,7 +51,7 @@ func (h *Handler) handleDocument(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		h.getDocument(w, id)
+		h.getDocument(w, r, id)
 	case http.MethodDelete:
 		h.deleteDocument(w, id)
 	default:
@@ -82,8 +82,21 @@ func (h *Handler) postDocument(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"timestamp": ts.String()})
 }
 
-func (h *Handler) getDocument(w http.ResponseWriter, id string) {
-	doc, err := h.coordinator.Get(id)
+func (h *Handler) getDocument(w http.ResponseWriter, r *http.Request, id string) {
+	var doc *Document
+	var err error
+
+	if after := r.URL.Query().Get("after"); after != "" {
+		ts, parseErr := ParseTimestamp(after)
+		if parseErr != nil {
+			http.Error(w, "invalid after timestamp", http.StatusBadRequest)
+			return
+		}
+		doc, err = h.coordinator.GetAt(id, ts)
+	} else {
+		doc, err = h.coordinator.Get(id)
+	}
+
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			http.Error(w, "not found", http.StatusNotFound)
@@ -107,8 +120,21 @@ func (h *Handler) deleteDocument(w http.ResponseWriter, id string) {
 	json.NewEncoder(w).Encode(map[string]string{"timestamp": ts.String()})
 }
 
-func (h *Handler) scanDocuments(w http.ResponseWriter, _ *http.Request) {
-	docs, err := h.coordinator.Scan()
+func (h *Handler) scanDocuments(w http.ResponseWriter, r *http.Request) {
+	var docs []*Document
+	var err error
+
+	if after := r.URL.Query().Get("after"); after != "" {
+		ts, parseErr := ParseTimestamp(after)
+		if parseErr != nil {
+			http.Error(w, "invalid after timestamp", http.StatusBadRequest)
+			return
+		}
+		docs, err = h.coordinator.ScanAt(ts)
+	} else {
+		docs, err = h.coordinator.Scan()
+	}
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
