@@ -7,8 +7,9 @@ package bdb
 // and delivers completed batches to subscribers for execution by the
 // storage layer.
 type Log interface {
-	// Append adds a transaction to the current epoch's pending batch.
-	Append(txn *Transaction) error
+	// Append adds a transaction to the current epoch's pending batch and
+	// blocks until the batch is committed. Returns the commit timestamp.
+	Append(txn *Transaction) (Timestamp, error)
 
 	// Subscribe returns a channel that receives completed batches as
 	// each epoch is flushed. Must be called before Start.

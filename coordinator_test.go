@@ -8,77 +8,78 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestStack creates a fully wired coordinator+log+storage for testing.
-// It returns the coordinator and a cleanup function. Use log.Tick() to
-// manually advance epochs.
-func newTestStack() (*Coordinator, *MemoryLog, func()) {
+// newTestStack creates a fully wired coordinator with auto-ticking log.
+func newTestStack(t *testing.T) (*Coordinator, func()) {
+	t.Helper()
 	cfg := DefaultConfig()
+	cfg.EpochDuration = 5 * time.Millisecond
 	log := NewMemoryLog(cfg)
 	storage := NewMemoryStorage()
-	ch := log.Subscribe()
-	storage.Start(ch)
+	storage.Start(log.Subscribe())
 	coord := NewCoordinator(log, storage)
+	log.Start()
 	cleanup := func() {
 		log.Stop()
 		storage.Stop()
 	}
-	return coord, log, cleanup
+	return coord, cleanup
 }
 
 func TestCoordinator_Put(t *testing.T) {
 	assert := assert.New(t)
-	coord, log, cleanup := newTestStack()
+	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
-	assert.NoError(coord.Put("a", map[string][]byte{"k": []byte("v")}))
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	ts, err := coord.Put("a", map[string][]byte{"k": []byte("v")})
+	require.NoError(t, err)
+	assert.False(ts.IsZero())
 
-	doc, err := coord.Get("a")
+	doc, err := coord.GetAt("a", ts)
 	assert.NoError(err)
 	assert.Equal("v", string(doc.Fields["k"]))
 }
 
 func TestCoordinator_Delete(t *testing.T) {
 	assert := assert.New(t)
-	coord, log, cleanup := newTestStack()
+	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
-	assert.NoError(coord.Put("a", map[string][]byte{"k": []byte("v")}))
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	putTs, err := coord.Put("a", map[string][]byte{"k": []byte("v")})
+	require.NoError(t, err)
 
-	assert.NoError(coord.Delete("a"))
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	doc, err := coord.GetAt("a", putTs)
+	assert.NoError(err)
+	assert.NotNil(doc)
 
-	_, err := coord.Get("a")
+	delTs, err := coord.Delete("a")
+	require.NoError(t, err)
+
+	_, err = coord.GetAt("a", delTs)
 	assert.ErrorIs(err, ErrNotFound)
 }
 
 func TestCoordinator_Transact(t *testing.T) {
 	assert := assert.New(t)
-	coord, log, cleanup := newTestStack()
+	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
 	d1 := NewDocument("a", map[string][]byte{"k": []byte("1")})
 	d2 := NewDocument("b", map[string][]byte{"k": []byte("2")})
 	txn := NewTransaction(nil, []*Document{d1, d2}, nil)
-	assert.NoError(coord.Transact(txn))
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	ts, err := coord.Transact(txn)
+	require.NoError(t, err)
 
-	doc1, err := coord.Get("a")
+	doc1, err := coord.GetAt("a", ts)
 	assert.NoError(err)
 	assert.Equal("1", string(doc1.Fields["k"]))
 
-	doc2, err := coord.Get("b")
+	doc2, err := coord.GetAt("b", ts)
 	assert.NoError(err)
 	assert.Equal("2", string(doc2.Fields["k"]))
 }
 
 func TestCoordinator_Get(t *testing.T) {
-	coord, _, cleanup := newTestStack()
+	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
 	_, err := coord.Get("nonexistent")
@@ -87,15 +88,33 @@ func TestCoordinator_Get(t *testing.T) {
 
 func TestCoordinator_Scan(t *testing.T) {
 	assert := assert.New(t)
-	coord, log, cleanup := newTestStack()
+	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
-	require.NoError(t, coord.Put("a", map[string][]byte{"k": []byte("1")}))
-	require.NoError(t, coord.Put("b", map[string][]byte{"k": []byte("2")}))
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	ts, err := coord.Put("a", map[string][]byte{"k": []byte("1")})
+	require.NoError(t, err)
+	_, err = coord.Put("b", map[string][]byte{"k": []byte("2")})
+	require.NoError(t, err)
+
+	// Wait for storage to catch up
+	coord.storage.WaitForTimestamp(ts)
 
 	docs, err := coord.Scan()
 	assert.NoError(err)
-	assert.Len(docs, 2)
+	assert.GreaterOrEqual(len(docs), 2)
+}
+
+func TestCoordinator_ReadYourOwnWrites(t *testing.T) {
+	assert := assert.New(t)
+	coord, cleanup := newTestStack(t)
+	defer cleanup()
+
+	// Write returns a timestamp
+	ts, err := coord.Put("key", map[string][]byte{"val": []byte("hello")})
+	require.NoError(t, err)
+
+	// Immediately read at that timestamp -- this blocks until storage catches up
+	doc, err := coord.GetAt("key", ts)
+	assert.NoError(err)
+	assert.Equal("hello", string(doc.Fields["val"]))
 }

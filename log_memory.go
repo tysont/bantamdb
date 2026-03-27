@@ -9,13 +9,21 @@ import (
 
 var _ Log = (*MemoryLog)(nil)
 
+// pendingEntry is a transaction waiting to be committed in the next batch.
+type pendingEntry struct {
+	txn       *Transaction
+	committed chan Timestamp
+}
+
 // MemoryLog implements the Log interface with in-memory storage. It
 // accumulates transactions and flushes them as batches on each epoch tick.
+// Append blocks until the transaction's batch is flushed, returning the
+// commit timestamp.
 type MemoryLog struct {
 	mu          sync.Mutex
 	config      Config
 	clock       *Clock
-	pending     []*Transaction
+	pending     []pendingEntry
 	subscribers []chan *Batch
 	ticker      *time.Ticker
 	done        chan struct{}
@@ -25,21 +33,31 @@ type MemoryLog struct {
 // NewMemoryLog creates a new in-memory transaction log.
 func NewMemoryLog(config Config) *MemoryLog {
 	return &MemoryLog{
-		config:  config,
-		clock:   NewClock(),
-		pending: make([]*Transaction, 0),
+		config: config,
+		clock:  NewClock(),
 	}
 }
 
-// Append adds a transaction to the current epoch's pending batch.
-func (l *MemoryLog) Append(txn *Transaction) error {
+// Append adds a transaction to the current epoch's pending batch and
+// blocks until the batch is committed. Returns the commit timestamp.
+func (l *MemoryLog) Append(txn *Transaction) (Timestamp, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.stopped {
-		return ErrStopped
+		l.mu.Unlock()
+		return TimestampZero(), ErrStopped
 	}
-	l.pending = append(l.pending, txn)
-	return nil
+	entry := pendingEntry{
+		txn:       txn,
+		committed: make(chan Timestamp, 1),
+	}
+	l.pending = append(l.pending, entry)
+	l.mu.Unlock()
+
+	ts, ok := <-entry.committed
+	if !ok {
+		return TimestampZero(), ErrStopped
+	}
+	return ts, nil
 }
 
 // Subscribe returns a channel that will receive completed batches.
@@ -74,7 +92,8 @@ func (l *MemoryLog) Start() error {
 	return nil
 }
 
-// Stop halts epoch ticking and closes all subscriber channels.
+// Stop halts epoch ticking, closes all subscriber channels, and unblocks
+// any pending Append calls.
 func (l *MemoryLog) Stop() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -86,14 +105,19 @@ func (l *MemoryLog) Stop() error {
 		l.ticker.Stop()
 		close(l.done)
 	}
+	for _, entry := range l.pending {
+		close(entry.committed)
+	}
+	l.pending = nil
 	for _, ch := range l.subscribers {
 		close(ch)
 	}
 	return nil
 }
 
-// Tick manually triggers an epoch flush. This is useful for testing
-// without relying on timers.
+// Tick manually triggers an epoch flush. Pending transactions are batched
+// together, delivered to subscribers, and their Append callers are
+// unblocked with the batch timestamp.
 func (l *MemoryLog) Tick() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -101,9 +125,19 @@ func (l *MemoryLog) Tick() {
 		return
 	}
 	ts := l.clock.Now()
-	batch := NewBatch(ts, l.pending)
-	l.pending = make([]*Transaction, 0)
+	txns := make([]*Transaction, len(l.pending))
+	entries := l.pending
+	for i, e := range entries {
+		txns[i] = e.txn
+	}
+	l.pending = nil
+
+	batch := NewBatch(ts, txns)
 	for _, ch := range l.subscribers {
 		ch <- batch
+	}
+	for _, entry := range entries {
+		entry.committed <- ts
+		close(entry.committed)
 	}
 }

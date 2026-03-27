@@ -12,13 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestServer() (*httptest.Server, *MemoryLog, func()) {
+func newTestServer() (*httptest.Server, func()) {
 	cfg := DefaultConfig()
+	cfg.EpochDuration = 5 * time.Millisecond
 	log := NewMemoryLog(cfg)
 	storage := NewMemoryStorage()
-	ch := log.Subscribe()
-	storage.Start(ch)
+	storage.Start(log.Subscribe())
 	coord := NewCoordinator(log, storage)
+	log.Start()
 	handler := NewHandler(coord)
 	server := httptest.NewServer(handler)
 	cleanup := func() {
@@ -26,7 +27,7 @@ func newTestServer() (*httptest.Server, *MemoryLog, func()) {
 		log.Stop()
 		storage.Stop()
 	}
-	return server, log, cleanup
+	return server, cleanup
 }
 
 func postDocument(t *testing.T, url string, id string, fields map[string]string) *http.Response {
@@ -48,16 +49,19 @@ func postDocument(t *testing.T, url string, id string, fields map[string]string)
 
 func TestHTTP_PutAndGet(t *testing.T) {
 	assert := assert.New(t)
-	server, log, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	resp := postDocument(t, server.URL, "user1", map[string]string{"name": "alice"})
-	assert.Equal(http.StatusAccepted, resp.StatusCode)
+	assert.Equal(http.StatusCreated, resp.StatusCode)
+
+	// Parse the commit timestamp from the response
+	var result map[string]string
+	json.NewDecoder(resp.Body).Decode(&result)
 	resp.Body.Close()
+	assert.NotEmpty(result["timestamp"])
 
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
-
+	// Read should work immediately -- write was synchronous
 	resp, err := http.Get(server.URL + "/documents/user1")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -70,7 +74,7 @@ func TestHTTP_PutAndGet(t *testing.T) {
 }
 
 func TestHTTP_GetNotFound(t *testing.T) {
-	server, _, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	resp, err := http.Get(server.URL + "/documents/nonexistent")
@@ -81,22 +85,18 @@ func TestHTTP_GetNotFound(t *testing.T) {
 
 func TestHTTP_Delete(t *testing.T) {
 	assert := assert.New(t)
-	server, log, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	postDocument(t, server.URL, "user1", map[string]string{"name": "alice"})
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
 
 	req, _ := http.NewRequest(http.MethodDelete, server.URL+"/documents/user1", nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	resp.Body.Close()
-	assert.Equal(http.StatusAccepted, resp.StatusCode)
+	assert.Equal(http.StatusCreated, resp.StatusCode)
 
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
-
+	// Synchronous: delete is committed, read should fail
 	resp, err = http.Get(server.URL + "/documents/user1")
 	require.NoError(t, err)
 	resp.Body.Close()
@@ -105,14 +105,12 @@ func TestHTTP_Delete(t *testing.T) {
 
 func TestHTTP_Scan(t *testing.T) {
 	assert := assert.New(t)
-	server, log, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	postDocument(t, server.URL, "a", map[string]string{"k": "1"})
 	postDocument(t, server.URL, "b", map[string]string{"k": "2"})
 	postDocument(t, server.URL, "c", map[string]string{"k": "3"})
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
 
 	resp, err := http.Get(server.URL + "/documents")
 	require.NoError(t, err)
@@ -126,7 +124,7 @@ func TestHTTP_Scan(t *testing.T) {
 
 func TestHTTP_Transaction(t *testing.T) {
 	assert := assert.New(t)
-	server, log, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	txn := struct {
@@ -143,10 +141,7 @@ func TestHTTP_Transaction(t *testing.T) {
 	resp, err := http.Post(server.URL+"/transactions", "application/json", bytes.NewReader(b))
 	require.NoError(t, err)
 	resp.Body.Close()
-	assert.Equal(http.StatusAccepted, resp.StatusCode)
-
-	log.Tick()
-	time.Sleep(5 * time.Millisecond)
+	assert.Equal(http.StatusCreated, resp.StatusCode)
 
 	resp, err = http.Get(server.URL + "/documents/a")
 	require.NoError(t, err)
@@ -155,7 +150,7 @@ func TestHTTP_Transaction(t *testing.T) {
 }
 
 func TestHTTP_BadRequest(t *testing.T) {
-	server, _, cleanup := newTestServer()
+	server, cleanup := newTestServer()
 	defer cleanup()
 
 	resp, err := http.Post(server.URL+"/documents", "application/json", bytes.NewReader([]byte("not json")))

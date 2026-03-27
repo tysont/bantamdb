@@ -72,11 +72,14 @@ func (h *Handler) postDocument(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	if err := h.coordinator.Put(req.Id, req.Fields); err != nil {
+	ts, err := h.coordinator.Put(req.Id, req.Fields)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"timestamp": ts.String()})
 }
 
 func (h *Handler) getDocument(w http.ResponseWriter, id string) {
@@ -94,11 +97,14 @@ func (h *Handler) getDocument(w http.ResponseWriter, id string) {
 }
 
 func (h *Handler) deleteDocument(w http.ResponseWriter, id string) {
-	if err := h.coordinator.Delete(id); err != nil {
+	ts, err := h.coordinator.Delete(id)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"timestamp": ts.String()})
 }
 
 func (h *Handler) scanDocuments(w http.ResponseWriter, _ *http.Request) {
@@ -127,9 +133,12 @@ func (h *Handler) handleTransactions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	txn := NewTransaction(req.ReadSet, req.Writes, req.Deletes)
-	if err := h.coordinator.Transact(txn); err != nil {
+	ts, err := h.coordinator.Transact(txn)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"timestamp": ts.String()})
 }
