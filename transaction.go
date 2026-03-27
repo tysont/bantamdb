@@ -1,4 +1,4 @@
-package main
+package bdb
 
 type Transaction struct {
 	Checks []string

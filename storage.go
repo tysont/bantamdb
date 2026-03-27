@@ -1,4 +1,4 @@
-package main
+package bdb
 
 type Storage interface {
 	Apply(batch *Batch) error

@@ -1,3 +1,3 @@
-package main
+package bdb
 
 const epochMilliseconds = 10

@@ -1,4 +1,4 @@
-package main
+package bdb
 
 type Log interface {
 	Write(transaction Transaction) error

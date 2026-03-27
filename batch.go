@@ -1,4 +1,4 @@
-package main
+package bdb
 
 type Batch struct {
 	Epoch uint64

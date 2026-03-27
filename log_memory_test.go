@@ -1,4 +1,4 @@
-package main
+package bdb
 
 import (
 	"github.com/stretchr/testify/assert"
