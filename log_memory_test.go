@@ -1,31 +1,140 @@
 package bdb
 
 import (
-	"github.com/stretchr/testify/assert"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestWriteBatchTransactionLog(t *testing.T) {
+func TestMemoryLog_AppendAndTick(t *testing.T) {
 	assert := assert.New(t)
-	id := "a"
-	k := "foo"
-	v := "zow"
-	f := map[string][]byte{k: []byte(v)}
-	d1 := NewDocument(id, f)
-	cs := []string{id, "b", "c"}
-	ds := []*Document{d1}
-	txn := NewTransaction(cs, ds, nil)
-	l := NewMemoryLog()
-	err := l.Write(txn)
-	assert.NoError(err)
-	time.Sleep(l.epochDuration * 2)
-	c, err := l.Range(0)
-	assert.NoError(err)
-	i := 0
-	for b := range c {
-		assert.NotNil(b)
-		i += len(b.Transactions)
+	l := NewMemoryLog(DefaultConfig())
+	ch := l.Subscribe()
+
+	d := NewDocument("a", map[string][]byte{"k": []byte("v")})
+	txn := NewTransaction(nil, []*Document{d}, nil)
+	assert.NoError(l.Append(txn))
+
+	l.Tick()
+
+	select {
+	case batch := <-ch:
+		require.NotNil(t, batch)
+		assert.Equal(uint64(1), batch.Epoch)
+		assert.Len(batch.Transactions, 1)
+		assert.Equal("a", batch.Transactions[0].Writes[0].Id)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for batch")
 	}
-	assert.Equal(1, i)
+}
+
+func TestMemoryLog_TickEmpty(t *testing.T) {
+	assert := assert.New(t)
+	l := NewMemoryLog(DefaultConfig())
+	ch := l.Subscribe()
+
+	l.Tick()
+
+	select {
+	case batch := <-ch:
+		require.NotNil(t, batch)
+		assert.Equal(uint64(1), batch.Epoch)
+		assert.Empty(batch.Transactions)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for batch")
+	}
+}
+
+func TestMemoryLog_MultipleBatches(t *testing.T) {
+	assert := assert.New(t)
+	l := NewMemoryLog(DefaultConfig())
+	ch := l.Subscribe()
+
+	// Epoch 1: one transaction
+	d1 := NewDocument("a", map[string][]byte{"k": []byte("v1")})
+	assert.NoError(l.Append(NewTransaction(nil, []*Document{d1}, nil)))
+	l.Tick()
+
+	// Epoch 2: two transactions
+	d2 := NewDocument("b", map[string][]byte{"k": []byte("v2")})
+	d3 := NewDocument("c", map[string][]byte{"k": []byte("v3")})
+	assert.NoError(l.Append(NewTransaction(nil, []*Document{d2}, nil)))
+	assert.NoError(l.Append(NewTransaction(nil, []*Document{d3}, nil)))
+	l.Tick()
+
+	batch1 := <-ch
+	require.NotNil(t, batch1)
+	assert.Equal(uint64(1), batch1.Epoch)
+	assert.Len(batch1.Transactions, 1)
+
+	batch2 := <-ch
+	require.NotNil(t, batch2)
+	assert.Equal(uint64(2), batch2.Epoch)
+	assert.Len(batch2.Transactions, 2)
+}
+
+func TestMemoryLog_ConcurrentAppend(t *testing.T) {
+	assert := assert.New(t)
+	l := NewMemoryLog(DefaultConfig())
+	ch := l.Subscribe()
+
+	n := 100
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			d := NewDocument("x", map[string][]byte{"k": []byte("v")})
+			l.Append(NewTransaction(nil, []*Document{d}, nil))
+		}()
+	}
+	wg.Wait()
+
+	l.Tick()
+
+	batch := <-ch
+	require.NotNil(t, batch)
+	assert.Len(batch.Transactions, n)
+}
+
+func TestMemoryLog_StartStop(t *testing.T) {
+	assert := assert.New(t)
+	cfg := DefaultConfig()
+	cfg.EpochDuration = 5 * time.Millisecond
+	l := NewMemoryLog(cfg)
+	ch := l.Subscribe()
+
+	d := NewDocument("a", map[string][]byte{"k": []byte("v")})
+	assert.NoError(l.Append(NewTransaction(nil, []*Document{d}, nil)))
+
+	assert.NoError(l.Start())
+
+	// Wait for at least one epoch to flush
+	select {
+	case batch := <-ch:
+		require.NotNil(t, batch)
+		assert.GreaterOrEqual(len(batch.Transactions), 0)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for automatic batch")
+	}
+
+	assert.NoError(l.Stop())
+
+	// Channel should be closed after stop
+	_, open := <-ch
+	assert.False(open, "subscriber channel should be closed after Stop")
+}
+
+func TestMemoryLog_AppendAfterStop(t *testing.T) {
+	assert := assert.New(t)
+	l := NewMemoryLog(DefaultConfig())
+	_ = l.Subscribe()
+	assert.NoError(l.Start())
+	assert.NoError(l.Stop())
+
+	err := l.Append(NewTransaction(nil, []*Document{NewDocument("a", nil)}, nil))
+	assert.ErrorIs(err, ErrStopped)
 }
