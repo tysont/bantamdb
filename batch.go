@@ -2,18 +2,34 @@
 // ABOUTME: forming the core unit of the Calvin transaction log.
 package bdb
 
-// Batch represents a group of transactions assigned to a single epoch.
+import "encoding/json"
+
+// Batch represents a group of transactions assigned to a single timestamp.
 // The transaction log produces batches at a fixed interval, and storage
-// nodes apply them in epoch order to maintain deterministic state.
+// nodes apply them in timestamp order to maintain deterministic state.
 type Batch struct {
-	Epoch        uint64
+	Timestamp    Timestamp
 	Transactions []*Transaction
 }
 
-// NewBatch creates a batch for the given epoch with the provided transactions.
-func NewBatch(epoch uint64, transactions []*Transaction) *Batch {
+// NewBatch creates a batch for the given timestamp with the provided transactions.
+func NewBatch(ts Timestamp, transactions []*Transaction) *Batch {
 	return &Batch{
-		Epoch:        epoch,
+		Timestamp:    ts,
 		Transactions: transactions,
 	}
+}
+
+// Marshal serializes a batch to bytes for Raft log entries.
+func (b *Batch) Marshal() ([]byte, error) {
+	return json.Marshal(b)
+}
+
+// UnmarshalBatch deserializes a batch from bytes.
+func UnmarshalBatch(data []byte) (*Batch, error) {
+	var b Batch
+	if err := json.Unmarshal(data, &b); err != nil {
+		return nil, err
+	}
+	return &b, nil
 }

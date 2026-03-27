@@ -12,20 +12,21 @@ var _ Log = (*MemoryLog)(nil)
 // MemoryLog implements the Log interface with in-memory storage. It
 // accumulates transactions and flushes them as batches on each epoch tick.
 type MemoryLog struct {
-	mu            sync.Mutex
-	config        Config
-	epoch         uint64
-	pending       []*Transaction
-	subscribers   []chan *Batch
-	ticker        *time.Ticker
-	done          chan struct{}
-	stopped       bool
+	mu          sync.Mutex
+	config      Config
+	clock       *Clock
+	pending     []*Transaction
+	subscribers []chan *Batch
+	ticker      *time.Ticker
+	done        chan struct{}
+	stopped     bool
 }
 
 // NewMemoryLog creates a new in-memory transaction log.
 func NewMemoryLog(config Config) *MemoryLog {
 	return &MemoryLog{
 		config:  config,
+		clock:   NewClock(),
 		pending: make([]*Transaction, 0),
 	}
 }
@@ -96,8 +97,11 @@ func (l *MemoryLog) Stop() error {
 func (l *MemoryLog) Tick() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.epoch++
-	batch := NewBatch(l.epoch, l.pending)
+	if l.stopped {
+		return
+	}
+	ts := l.clock.Now()
+	batch := NewBatch(ts, l.pending)
 	l.pending = make([]*Transaction, 0)
 	for _, ch := range l.subscribers {
 		ch <- batch

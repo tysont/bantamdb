@@ -23,7 +23,7 @@ func TestMemoryLog_AppendAndTick(t *testing.T) {
 	select {
 	case batch := <-ch:
 		require.NotNil(t, batch)
-		assert.Equal(uint64(1), batch.Epoch)
+		assert.False(batch.Timestamp.IsZero(), "batch timestamp should not be zero")
 		assert.Len(batch.Transactions, 1)
 		assert.Equal("a", batch.Transactions[0].Writes[0].Id)
 	case <-time.After(time.Second):
@@ -41,7 +41,7 @@ func TestMemoryLog_TickEmpty(t *testing.T) {
 	select {
 	case batch := <-ch:
 		require.NotNil(t, batch)
-		assert.Equal(uint64(1), batch.Epoch)
+		assert.False(batch.Timestamp.IsZero())
 		assert.Empty(batch.Transactions)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for batch")
@@ -53,12 +53,12 @@ func TestMemoryLog_MultipleBatches(t *testing.T) {
 	l := NewMemoryLog(DefaultConfig())
 	ch := l.Subscribe()
 
-	// Epoch 1: one transaction
+	// Batch 1: one transaction
 	d1 := NewDocument("a", map[string][]byte{"k": []byte("v1")})
 	assert.NoError(l.Append(NewTransaction(nil, []*Document{d1}, nil)))
 	l.Tick()
 
-	// Epoch 2: two transactions
+	// Batch 2: two transactions
 	d2 := NewDocument("b", map[string][]byte{"k": []byte("v2")})
 	d3 := NewDocument("c", map[string][]byte{"k": []byte("v3")})
 	assert.NoError(l.Append(NewTransaction(nil, []*Document{d2}, nil)))
@@ -67,13 +67,12 @@ func TestMemoryLog_MultipleBatches(t *testing.T) {
 
 	batch1 := <-ch
 	require.NotNil(t, batch1)
-	assert.Equal(uint64(1), batch1.Epoch)
 	assert.Len(batch1.Transactions, 1)
 
 	batch2 := <-ch
 	require.NotNil(t, batch2)
-	assert.Equal(uint64(2), batch2.Epoch)
 	assert.Len(batch2.Transactions, 2)
+	assert.True(batch2.Timestamp.After(batch1.Timestamp), "batch timestamps must be monotonically increasing")
 }
 
 func TestMemoryLog_ConcurrentAppend(t *testing.T) {
@@ -84,7 +83,7 @@ func TestMemoryLog_ConcurrentAppend(t *testing.T) {
 	n := 100
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			d := NewDocument("x", map[string][]byte{"k": []byte("v")})
@@ -112,18 +111,15 @@ func TestMemoryLog_StartStop(t *testing.T) {
 
 	assert.NoError(l.Start())
 
-	// Wait for at least one epoch to flush
 	select {
 	case batch := <-ch:
 		require.NotNil(t, batch)
-		assert.GreaterOrEqual(len(batch.Transactions), 0)
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("timed out waiting for automatic batch")
 	}
 
 	assert.NoError(l.Stop())
 
-	// Channel should be closed after stop
 	_, open := <-ch
 	assert.False(open, "subscriber channel should be closed after Stop")
 }

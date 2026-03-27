@@ -12,18 +12,18 @@ var _ Storage = (*MemoryStorage)(nil)
 // It tails the transaction log's batch channel, validates each transaction
 // using optimistic concurrency control, and applies valid writes.
 type MemoryStorage struct {
-	mu        sync.RWMutex
-	documents map[string]*Document
-	epochs    map[string]uint64 // last write epoch per document ID
-	done      chan struct{}
-	stopped   bool
+	mu         sync.RWMutex
+	documents  map[string]*Document
+	timestamps map[string]Timestamp // last write timestamp per document ID
+	done       chan struct{}
+	stopped    bool
 }
 
 // NewMemoryStorage creates a new in-memory storage instance.
 func NewMemoryStorage() *MemoryStorage {
 	return &MemoryStorage{
-		documents: make(map[string]*Document),
-		epochs:    make(map[string]uint64),
+		documents:  make(map[string]*Document),
+		timestamps: make(map[string]Timestamp),
 	}
 }
 
@@ -97,27 +97,27 @@ func (s *MemoryStorage) applyBatch(batch *Batch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, txn := range batch.Transactions {
-		if !s.validate(txn, batch.Epoch) {
+		if !s.validate(txn, batch.Timestamp) {
 			continue
 		}
 		for _, doc := range txn.Writes {
 			s.documents[doc.Id] = doc
-			s.epochs[doc.Id] = batch.Epoch
+			s.timestamps[doc.Id] = batch.Timestamp
 		}
 		for _, id := range txn.Deletes {
 			delete(s.documents, id)
-			s.epochs[id] = batch.Epoch
+			s.timestamps[id] = batch.Timestamp
 		}
 	}
 }
 
 // validate checks that no key in the transaction's read set was written
-// at an epoch later than the batch epoch. This is the optimistic
+// at a timestamp later than the batch timestamp. This is the optimistic
 // concurrency control check matching Fauna's storage validation.
-func (s *MemoryStorage) validate(txn *Transaction, epoch uint64) bool {
+func (s *MemoryStorage) validate(txn *Transaction, ts Timestamp) bool {
 	for _, id := range txn.ReadSet {
-		if writeEpoch, ok := s.epochs[id]; ok {
-			if writeEpoch > epoch {
+		if writeTS, ok := s.timestamps[id]; ok {
+			if writeTS.After(ts) {
 				return false
 			}
 		}
