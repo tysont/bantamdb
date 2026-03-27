@@ -42,13 +42,25 @@ func (c *Coordinator) Transact(txn *Transaction) error {
 	return c.log.Append(txn)
 }
 
-// Get retrieves a document directly from storage without going through
-// the transaction log.
+// Get retrieves a document at the latest applied timestamp. This reads
+// directly from storage without going through the transaction log.
 func (c *Coordinator) Get(id string) (*Document, error) {
-	return c.storage.Get(id)
+	at := c.storage.AppliedTimestamp()
+	return c.storage.Get(id, at)
 }
 
-// Scan returns all documents directly from storage.
+// GetAt retrieves a document at a specific timestamp. It blocks until
+// storage has caught up to the requested timestamp, ensuring consistent
+// reads.
+func (c *Coordinator) GetAt(id string, at Timestamp) (*Document, error) {
+	if err := c.storage.WaitForTimestamp(at); err != nil {
+		return nil, err
+	}
+	return c.storage.Get(id, at)
+}
+
+// Scan returns all documents at the latest applied timestamp.
 func (c *Coordinator) Scan() ([]*Document, error) {
-	return c.storage.Scan()
+	at := c.storage.AppliedTimestamp()
+	return c.storage.Scan(at)
 }

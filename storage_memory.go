@@ -1,5 +1,5 @@
-// ABOUTME: MemoryStorage is an in-memory implementation of the storage layer.
-// ABOUTME: It tails the transaction log, validates OCC, and applies writes.
+// ABOUTME: MemoryStorage is an in-memory MVCC implementation of the storage layer.
+// ABOUTME: It tails the transaction log, validates OCC, and stores multiple document versions.
 package bdb
 
 import (
@@ -8,50 +8,100 @@ import (
 
 var _ Storage = (*MemoryStorage)(nil)
 
-// MemoryStorage implements the Storage interface with in-memory maps.
-// It tails the transaction log's batch channel, validates each transaction
-// using optimistic concurrency control, and applies valid writes.
+// version represents a single point-in-time version of a document.
+// A nil Doc indicates a tombstone (deletion).
+type version struct {
+	Timestamp Timestamp
+	Doc       *Document
+}
+
+// MemoryStorage implements the Storage interface with in-memory MVCC.
+// Each document ID maps to a list of versions ordered by timestamp.
+// Reads at a specific timestamp return the latest version at or before
+// that point. OCC validation checks that read-set keys haven't been
+// written after the batch timestamp.
 type MemoryStorage struct {
-	mu         sync.RWMutex
-	documents  map[string]*Document
-	timestamps map[string]Timestamp // last write timestamp per document ID
-	done       chan struct{}
-	stopped    bool
+	mu       sync.RWMutex
+	cond     *sync.Cond
+	versions map[string][]version
+	applied  Timestamp
+	done     chan struct{}
+	stopped  bool
 }
 
-// NewMemoryStorage creates a new in-memory storage instance.
+// NewMemoryStorage creates a new in-memory MVCC storage instance.
 func NewMemoryStorage() *MemoryStorage {
-	return &MemoryStorage{
-		documents:  make(map[string]*Document),
-		timestamps: make(map[string]Timestamp),
+	s := &MemoryStorage{
+		versions: make(map[string][]version),
 	}
+	s.cond = sync.NewCond(s.mu.RLocker())
+	return s
 }
 
-// Get retrieves a document by ID. Returns ErrNotFound if the document
-// does not exist.
-func (s *MemoryStorage) Get(id string) (*Document, error) {
+// Get retrieves the latest version of a document at or before the given
+// timestamp. Returns ErrNotFound if no version exists or if the latest
+// version at that point is a tombstone.
+func (s *MemoryStorage) Get(id string, at Timestamp) (*Document, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	d, ok := s.documents[id]
+	return s.getAt(id, at)
+}
+
+// getAt is the lock-free internal implementation of Get. Caller must hold
+// at least a read lock.
+func (s *MemoryStorage) getAt(id string, at Timestamp) (*Document, error) {
+	vs, ok := s.versions[id]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return d, nil
+	// Find the latest version with timestamp <= at by scanning backward.
+	for i := len(vs) - 1; i >= 0; i-- {
+		if !vs[i].Timestamp.After(at) {
+			if vs[i].Doc == nil {
+				return nil, ErrNotFound // tombstone
+			}
+			return vs[i].Doc, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
-// Scan returns all documents in the store.
-func (s *MemoryStorage) Scan() ([]*Document, error) {
+// Scan returns all documents that exist at the given timestamp.
+func (s *MemoryStorage) Scan(at Timestamp) ([]*Document, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	docs := make([]*Document, 0, len(s.documents))
-	for _, d := range s.documents {
-		docs = append(docs, d)
+	var docs []*Document
+	for id := range s.versions {
+		doc, err := s.getAt(id, at)
+		if err == nil {
+			docs = append(docs, doc)
+		}
 	}
 	return docs, nil
 }
 
+// AppliedTimestamp returns the timestamp of the last applied batch.
+func (s *MemoryStorage) AppliedTimestamp() Timestamp {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.applied
+}
+
+// WaitForTimestamp blocks until storage has applied a batch with a
+// timestamp >= ts, or until the storage is stopped.
+func (s *MemoryStorage) WaitForTimestamp(ts Timestamp) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for !s.applied.After(ts) && s.applied.Compare(ts) != 0 && !s.stopped {
+		s.cond.Wait()
+	}
+	if s.stopped && s.applied.Compare(ts) < 0 {
+		return ErrStopped
+	}
+	return nil
+}
+
 // Start begins tailing the batch channel from the transaction log.
-// For each batch, it validates and applies transactions in order.
 func (s *MemoryStorage) Start(batches <-chan *Batch) error {
 	s.mu.Lock()
 	if s.stopped {
@@ -77,7 +127,7 @@ func (s *MemoryStorage) Start(batches <-chan *Batch) error {
 	return nil
 }
 
-// Stop halts batch processing.
+// Stop halts batch processing and wakes any waiters.
 func (s *MemoryStorage) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -88,11 +138,12 @@ func (s *MemoryStorage) Stop() error {
 	if s.done != nil {
 		close(s.done)
 	}
+	s.cond.Broadcast()
 	return nil
 }
 
-// applyBatch processes all transactions in a batch, validating OCC
-// constraints and applying writes for valid transactions.
+// applyBatch processes all transactions in a batch with OCC validation
+// and MVCC version storage.
 func (s *MemoryStorage) applyBatch(batch *Batch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,23 +152,29 @@ func (s *MemoryStorage) applyBatch(batch *Batch) {
 			continue
 		}
 		for _, doc := range txn.Writes {
-			s.documents[doc.Id] = doc
-			s.timestamps[doc.Id] = batch.Timestamp
+			s.versions[doc.Id] = append(s.versions[doc.Id], version{
+				Timestamp: batch.Timestamp,
+				Doc:       doc,
+			})
 		}
 		for _, id := range txn.Deletes {
-			delete(s.documents, id)
-			s.timestamps[id] = batch.Timestamp
+			s.versions[id] = append(s.versions[id], version{
+				Timestamp: batch.Timestamp,
+				Doc:       nil, // tombstone
+			})
 		}
 	}
+	s.applied = batch.Timestamp
+	s.cond.Broadcast()
 }
 
-// validate checks that no key in the transaction's read set was written
-// at a timestamp later than the batch timestamp. This is the optimistic
-// concurrency control check matching Fauna's storage validation.
+// validate checks OCC: no key in the read set was written after the
+// batch timestamp.
 func (s *MemoryStorage) validate(txn *Transaction, ts Timestamp) bool {
 	for _, id := range txn.ReadSet {
-		if writeTS, ok := s.timestamps[id]; ok {
-			if writeTS.After(ts) {
+		if vs, ok := s.versions[id]; ok && len(vs) > 0 {
+			latest := vs[len(vs)-1].Timestamp
+			if latest.After(ts) {
 				return false
 			}
 		}

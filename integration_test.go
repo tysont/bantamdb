@@ -133,18 +133,18 @@ func TestIntegration_OCCConflict(t *testing.T) {
 	log.Tick()
 	time.Sleep(5 * time.Millisecond)
 
-	doc, err := storage.Get("a")
+	doc, err := storage.Get("a", TimestampMax())
 	require.NoError(t, err)
 	assert.Equal("original", string(doc.Fields["v"]))
 
-	// Epoch 2: a valid update that reads "a" (read epoch 1 <= batch epoch 2)
+	// Epoch 2: a valid update that reads "a"
 	log.Append(NewTransaction([]string{"a"}, []*Document{
 		NewDocument("a", map[string][]byte{"v": []byte("updated")}),
 	}, nil))
 	log.Tick()
 	time.Sleep(5 * time.Millisecond)
 
-	doc, err = storage.Get("a")
+	doc, err = storage.Get("a", TimestampMax())
 	assert.NoError(err)
 	assert.Equal("updated", string(doc.Fields["v"]))
 }
