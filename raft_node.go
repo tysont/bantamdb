@@ -116,6 +116,8 @@ func (n *RaftNode) Propose(data []byte) (uint64, error) {
 	entry := LogEntry{Index: index, Term: term, Data: data}
 	n.state.Append([]LogEntry{entry})
 	n.matchIndex[n.id] = index
+	// Check if this entry can be committed immediately (e.g., single-node cluster)
+	n.advanceCommitIndexLocked()
 	n.mu.Unlock()
 
 	// Replicate to followers
