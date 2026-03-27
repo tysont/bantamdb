@@ -1,5 +1,5 @@
 // ABOUTME: CLI entrypoint for BantamDB. Wires together the database layers
-// ABOUTME: (log, storage, coordinator) and starts the HTTP server.
+// ABOUTME: and starts the server, supporting both single-node and clustered modes.
 package main
 
 import (
@@ -10,54 +10,81 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
 
 func main() {
-	var port int
-	var epoch time.Duration
+	var cfg bdb.Config
+	var peers string
 
 	root := &cobra.Command{
 		Use:   "bdb",
-		Short: "BantamDB - a Calvin-protocol database",
+		Short: "BantamDB - a Calvin-protocol distributed database",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return run(port, epoch)
+			if peers != "" {
+				cfg.Peers = strings.Split(peers, ",")
+			}
+			return run(cfg)
 		},
 	}
-	root.Flags().IntVar(&port, "port", 8080, "HTTP listen port")
-	root.Flags().DurationVar(&epoch, "epoch", 10*time.Millisecond, "epoch flush interval")
+	root.Flags().IntVar(&cfg.Port, "port", 8080, "HTTP listen port")
+	root.Flags().DurationVar(&cfg.EpochDuration, "epoch", 10*time.Millisecond, "epoch flush interval")
+	root.Flags().StringVar(&cfg.NodeID, "node-id", "", "unique node identifier")
+	root.Flags().StringVar(&cfg.RaftAddr, "raft-addr", "", "Raft bind address (enables clustered mode)")
+	root.Flags().StringVar(&peers, "peers", "", "comma-separated peer addresses")
+	root.Flags().BoolVar(&cfg.Bootstrap, "bootstrap", false, "bootstrap a new cluster")
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func run(port int, epoch time.Duration) error {
-	cfg := bdb.Config{
-		EpochDuration: epoch,
-		Port:          port,
+func run(cfg bdb.Config) error {
+	mux := http.NewServeMux()
+
+	var txnLog bdb.Log
+	if cfg.RaftAddr != "" {
+		// Clustered mode with Raft
+		if cfg.NodeID == "" {
+			cfg.NodeID = bdb.RandomString(8)
+		}
+		transport := bdb.NewHTTPTransport()
+		rl := bdb.NewRaftLog(cfg, cfg.NodeID, cfg.Peers, transport)
+		bdb.RegisterRaftHandlers(mux, rl.Node())
+		bdb.RegisterClusterHandlers(mux, rl)
+		txnLog = rl
+	} else {
+		// Single-node mode with in-memory log
+		txnLog = bdb.NewMemoryLog(cfg)
 	}
 
-	txnLog := bdb.NewMemoryLog(cfg)
 	storage := bdb.NewMemoryStorage()
 	storage.Start(txnLog.Subscribe())
 	coord := bdb.NewCoordinator(txnLog, storage)
 	handler := bdb.NewHandler(coord)
+	mux.Handle("/documents", handler)
+	mux.Handle("/documents/", handler)
+	mux.Handle("/transactions", handler)
 
 	txnLog.Start()
 
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: handler,
+		Addr:    fmt.Sprintf(":%d", cfg.Port),
+		Handler: mux,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	go func() {
-		log.Printf("bantamdb listening on :%d (epoch=%s)", port, epoch)
+		mode := "single-node"
+		if cfg.RaftAddr != "" {
+			mode = fmt.Sprintf("clustered (node=%s, peers=%v)", cfg.NodeID, cfg.Peers)
+		}
+		log.Printf("bantamdb listening on :%d (%s, epoch=%s)", cfg.Port, mode, cfg.EpochDuration)
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			log.Fatalf("HTTP server error: %v", err)
 		}

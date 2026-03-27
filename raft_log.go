@@ -38,6 +38,11 @@ func NewRaftLog(config Config, id string, peers []string, transport Transport) *
 	return rl
 }
 
+// Node returns the underlying Raft node for registering HTTP handlers.
+func (l *RaftLog) Node() *RaftNode {
+	return l.node
+}
+
 // IsLeader reports whether this node is the Raft leader.
 func (l *RaftLog) IsLeader() bool {
 	return l.node.Role() == Leader
