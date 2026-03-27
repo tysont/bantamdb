@@ -1,26 +1,16 @@
+// ABOUTME: General-purpose utility functions used across the codebase,
+// ABOUTME: including random string generation for IDs.
 package bdb
 
-import (
-	"github.com/spaolacci/murmur3"
-	"math/rand"
-)
-
-const uint32Max = 4294967295
-const uint64Max = 18446744073709551615
+import "math/rand/v2"
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-func GetRandomString(n int) string {
+// RandomString generates a random alphabetic string of length n.
+func RandomString(n int) string {
 	b := make([]rune, n)
 	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
+		b[i] = letters[rand.IntN(len(letters))]
 	}
 	return string(b)
-}
-
-func GetMurmurHash(s string) uint64 {
-	h := murmur3.New64()
-	h.Write([]byte(s))
-	k := h.Sum64()
-	return k
 }

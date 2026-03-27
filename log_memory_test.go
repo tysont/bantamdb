@@ -11,15 +11,15 @@ func TestWriteBatchTransactionLog(t *testing.T) {
 	id := "a"
 	k := "foo"
 	v := "zow"
-	f := map[string][]byte {k: []byte(v)}
+	f := map[string][]byte{k: []byte(v)}
 	d1 := NewDocument(id, f)
-	cs := []string {id, "b", "c"}
-	ds := []*Document {d1}
-	txn := NewTransaction(cs, ds)
+	cs := []string{id, "b", "c"}
+	ds := []*Document{d1}
+	txn := NewTransaction(cs, ds, nil)
 	l := NewMemoryLog()
 	err := l.Write(txn)
 	assert.NoError(err)
-	time.Sleep(epochMilliseconds * 2 * time.Millisecond)
+	time.Sleep(l.epochDuration * 2)
 	c, err := l.Range(0)
 	assert.NoError(err)
 	i := 0

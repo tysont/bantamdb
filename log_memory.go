@@ -5,23 +5,25 @@ import (
 	"time"
 )
 
-type MemoryLog struct
-{
-	lock *sync.Mutex
-	ticker *time.Ticker
-	batch *Batch
-	batches map[uint64]*Batch
+type MemoryLog struct {
+	lock          *sync.Mutex
+	ticker        *time.Ticker
+	epochDuration time.Duration
+	batch         *Batch
+	batches       map[uint64]*Batch
 }
 
 func NewMemoryLog() *MemoryLog {
+	d := DefaultConfig().EpochDuration
 	l := &MemoryLog{
-		lock: &sync.Mutex{},
-		ticker: time.NewTicker(epochMilliseconds * time.Millisecond),
-		batch: NewBatch(0, make([]*Transaction, 0)),
-		batches: make(map[uint64]*Batch, 0),
+		lock:          &sync.Mutex{},
+		ticker:        time.NewTicker(d),
+		epochDuration: d,
+		batch:         NewBatch(0, make([]*Transaction, 0)),
+		batches:       make(map[uint64]*Batch, 0),
 	}
 	go func() {
-		for _ = range l.ticker.C {
+		for range l.ticker.C {
 			l.tick()
 		}
 	}()
@@ -51,7 +53,7 @@ func (l *MemoryLog) Range(min uint64) (chan *Batch, error) {
 func (l *MemoryLog) tick() {
 	l.lock.Lock()
 	defer l.lock.Unlock()
-	b := NewBatch(l.batch.Epoch + 1, make([]*Transaction, 0))
+	b := NewBatch(l.batch.Epoch+1, make([]*Transaction, 0))
 	l.batches[b.Epoch] = l.batch
 	l.batch = b
 }
