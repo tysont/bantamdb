@@ -33,8 +33,7 @@ func main() {
 	root.Flags().IntVar(&cfg.Port, "port", 8080, "HTTP listen port")
 	root.Flags().DurationVar(&cfg.EpochDuration, "epoch", 10*time.Millisecond, "epoch flush interval")
 	root.Flags().StringVar(&cfg.NodeID, "node-id", "", "unique node identifier")
-	root.Flags().StringVar(&cfg.RaftAddr, "raft-addr", "", "Raft bind address (enables clustered mode)")
-	root.Flags().StringVar(&peers, "peers", "", "comma-separated peer addresses")
+	root.Flags().StringVar(&peers, "peers", "", "comma-separated peer HTTP addresses (e.g., http://localhost:8082,http://localhost:8083)")
 	root.Flags().BoolVar(&cfg.Bootstrap, "bootstrap", false, "bootstrap a new cluster")
 
 	if err := root.Execute(); err != nil {
@@ -46,11 +45,8 @@ func run(cfg bdb.Config) error {
 	mux := http.NewServeMux()
 
 	var txnLog bdb.Log
-	if cfg.RaftAddr != "" {
+	if cfg.NodeID != "" {
 		// Clustered mode with Raft
-		if cfg.NodeID == "" {
-			cfg.NodeID = bdb.RandomString(8)
-		}
 		transport := bdb.NewHTTPTransport()
 		rl := bdb.NewRaftLog(cfg, cfg.NodeID, cfg.Peers, transport)
 		bdb.RegisterRaftHandlers(mux, rl.Node())
@@ -81,7 +77,7 @@ func run(cfg bdb.Config) error {
 
 	go func() {
 		mode := "single-node"
-		if cfg.RaftAddr != "" {
+		if cfg.NodeID != "" {
 			mode = fmt.Sprintf("clustered (node=%s, peers=%v)", cfg.NodeID, cfg.Peers)
 		}
 		log.Printf("bantamdb listening on :%d (%s, epoch=%s)", cfg.Port, mode, cfg.EpochDuration)
