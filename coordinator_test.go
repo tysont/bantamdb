@@ -91,17 +91,17 @@ func TestCoordinator_Scan(t *testing.T) {
 	coord, cleanup := newTestStack(t)
 	defer cleanup()
 
-	ts, err := coord.Put("a", map[string][]byte{"k": []byte("1")})
+	_, err := coord.Put("a", map[string][]byte{"k": []byte("1")})
 	require.NoError(t, err)
-	_, err = coord.Put("b", map[string][]byte{"k": []byte("2")})
+	ts2, err := coord.Put("b", map[string][]byte{"k": []byte("2")})
 	require.NoError(t, err)
 
-	// Wait for storage to catch up
-	coord.storage.WaitForTimestamp(ts)
+	// Wait for storage to catch up to the latest write
+	coord.storage.WaitForTimestamp(ts2)
 
 	docs, err := coord.Scan()
 	assert.NoError(err)
-	assert.GreaterOrEqual(len(docs), 2)
+	assert.Len(docs, 2)
 }
 
 func TestCoordinator_ReadYourOwnWrites(t *testing.T) {

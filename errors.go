@@ -15,4 +15,7 @@ var (
 
 	// ErrStopped is returned when an operation is attempted on a stopped component.
 	ErrStopped = errors.New("component is stopped")
+
+	// ErrNotLeader is returned when a write is attempted on a non-leader node.
+	ErrNotLeader = errors.New("not the leader")
 )
